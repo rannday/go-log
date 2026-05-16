@@ -1,0 +1,7 @@
+logs/
+cover
+coverage
+cover_root
+coverage_root
+coverage.out
+*.coverprofile

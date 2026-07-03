@@ -7,22 +7,41 @@ import (
 	"context"
 	"log/slog"
 	"runtime/debug"
+	"sync/atomic"
 )
 
 type stackHandler struct {
-	next  slog.Handler
-	level slog.Level
+	next    slog.Handler
+	level   slog.Level
+	enabled bool
 }
 
-// maxStackBytes limits the size of attached stack traces. Default to 64KB.
-var maxStackBytes = 64 * 1024
+const defaultStackMaxBytes = 64 * 1024
+
+var stackMaxBytes atomic.Int64
+
+func init() {
+	stackMaxBytes.Store(defaultStackMaxBytes)
+}
 
 // SetStackMaxBytes configures the maximum bytes of the stack trace attached to records.
+// Intended for tests or advanced tuning; concurrent logging is safe.
 func SetStackMaxBytes(n int) {
 	if n <= 0 {
 		return
 	}
-	maxStackBytes = n
+	stackMaxBytes.Store(int64(n))
+}
+
+func currentStackMaxBytes() int {
+	n := stackMaxBytes.Load()
+	if n <= 0 {
+		return defaultStackMaxBytes
+	}
+	if n > int64(^uint(0)>>1) {
+		return int(^uint(0) >> 1)
+	}
+	return int(n)
 }
 
 func newStackHandler(next slog.Handler, level slog.Level, enabled bool) slog.Handler {
@@ -31,8 +50,9 @@ func newStackHandler(next slog.Handler, level slog.Level, enabled bool) slog.Han
 		return next
 	}
 	return &stackHandler{
-		next:  next,
-		level: level,
+		next:    next,
+		level:   level,
+		enabled: true,
 	}
 }
 
@@ -42,24 +62,21 @@ func (h *stackHandler) Enabled(ctx context.Context, level slog.Level) bool {
 
 func (h *stackHandler) Handle(ctx context.Context, r slog.Record) error {
 	if r.Level >= h.level {
-		nr := r.Clone()
 		stack := debug.Stack()
-		if len(stack) > maxStackBytes {
-			stack = stack[:maxStackBytes]
+		limit := currentStackMaxBytes()
+		if len(stack) > limit {
+			stack = stack[:limit]
 		}
-		nr.AddAttrs(
-			slog.String("stack", string(stack)),
-		)
-		return h.next.Handle(ctx, nr)
+		r.AddAttrs(slog.String("stack", string(stack)))
 	}
 
 	return h.next.Handle(ctx, r)
 }
 
 func (h *stackHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return newStackHandler(h.next.WithAttrs(attrs), h.level, true)
+	return newStackHandler(h.next.WithAttrs(attrs), h.level, h.enabled)
 }
 
 func (h *stackHandler) WithGroup(name string) slog.Handler {
-	return newStackHandler(h.next.WithGroup(name), h.level, true)
+	return newStackHandler(h.next.WithGroup(name), h.level, h.enabled)
 }

@@ -100,20 +100,22 @@ func (h *redactionHandler) Handle(ctx context.Context, r slog.Record) error {
 		return h.next.Handle(ctx, r)
 	}
 
-	nr := r.Clone()
-	attrs := make([]slog.Attr, 0)
-	nr.Attrs(func(a slog.Attr) bool {
-		attrs = append(attrs, redactAttr(a, keys))
+	attrs := make([]slog.Attr, 0, r.NumAttrs())
+	changed := false
+	r.Attrs(func(a slog.Attr) bool {
+		redacted, ok := redactAttr(a, keys)
+		if ok {
+			changed = true
+		}
+		attrs = append(attrs, redacted)
 		return true
 	})
 
-	newRec := slog.NewRecord(
-		nr.Time,
-		nr.Level,
-		nr.Message,
-		nr.PC,
-	)
+	if !changed {
+		return h.next.Handle(ctx, r)
+	}
 
+	newRec := slog.NewRecord(r.Time, r.Level, r.Message, r.PC)
 	newRec.AddAttrs(attrs...)
 
 	return h.next.Handle(ctx, newRec)
@@ -135,21 +137,29 @@ func cloneKeySet(src map[string]struct{}) map[string]struct{} {
 	return dst
 }
 
-func redactAttr(a slog.Attr, keys map[string]struct{}) slog.Attr {
+func redactAttr(a slog.Attr, keys map[string]struct{}) (slog.Attr, bool) {
 	if _, ok := keys[strings.ToLower(a.Key)]; ok {
 		a.Value = slog.StringValue("REDACTED")
-		return a
+		return a, true
 	}
 
 	if a.Value.Kind() != slog.KindGroup {
-		return a
+		return a, false
 	}
 
 	group := a.Value.Group()
 	redacted := make([]slog.Attr, 0, len(group))
+	changed := false
 	for _, child := range group {
-		redacted = append(redacted, redactAttr(child, keys))
+		next, ok := redactAttr(child, keys)
+		if ok {
+			changed = true
+		}
+		redacted = append(redacted, next)
+	}
+	if !changed {
+		return a, false
 	}
 	a.Value = slog.GroupValue(redacted...)
-	return a
+	return a, true
 }

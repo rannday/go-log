@@ -1,4 +1,17 @@
 logs/
+bin/
+*.test
+*.exe
+*.dll
+*.so
+*.dylib
+*.log
+*.tmp
+*.swp
+*.swo
+.DS_Store
+.idea/
+.vscode/
 cover
 coverage
 cover_root

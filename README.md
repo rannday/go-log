@@ -1,6 +1,7 @@
 # go-log
 
 Structured logging built on Go's `log/slog`.
+Zero dependency. Go 1.26.3+ is intentional.
 
 - Text or JSON output
 - Stack traces by level
@@ -8,6 +9,10 @@ Structured logging built on Go's `log/slog`.
 - Redaction support
 - HTTP server middleware
 - HTTP client transport
+- `Configure` installs package-global logger
+- `New` builds logger without touching globals
+- File rotation is size-based only
+- Color output is text-console only
 
 ## Requirements
 
@@ -59,6 +64,30 @@ logx.Configure(logx.Config{
 
 If you want stack traces at info level, set `StacktraceEnabled: true` and `StacktraceLevel: slog.LevelInfo`.
 
+## Build Without Installing
+
+Use `New` when you want a configured logger without touching global state.
+
+```go
+logger, closer, err := logx.New(logx.Config{
+	Level:      slog.LevelInfo,
+	Console:    true,
+	FilePath:   "app.log",
+	JSONFile:   false,
+	AddSource:  true,
+})
+if err != nil {
+	panic(err)
+}
+defer func() {
+	if closer != nil {
+		_ = closer.Close()
+	}
+}()
+
+logger.Info("ready")
+```
+
 ## Bootstrap Then Configure
 
 Use `Configure` for early console logging, then call `Configure` again after app config or env is loaded.
@@ -88,6 +117,7 @@ if err := logx.Configure(logx.Config{
 ```
 
 Calling `Configure` again is the supported way to attach file logging after startup.
+If file setup fails, `Configure` returns an error and leaves the previous global logger alone.
 
 ## Runtime Level Changes
 
@@ -168,7 +198,9 @@ defer done()
 
 ## Color Output
 
-- Enabled automatically for TTY
+- Color is only applied to text console output
+- Disabled for JSON console output
+- Disabled for file output
 - Disabled when piped
 - Disabled if `NO_COLOR` is set
 
@@ -200,6 +232,9 @@ import "github.com/rannday/go-log/httpx"
 handler := httpx.HTTPMiddleware(router)
 ```
 
+`HTTPMiddleware` adds timing, status logging, panic recovery, and request ID propagation.
+It stores the request ID in context and mirrors it to the `X-Request-ID` response header.
+
 ### HTTP Client Transport
 
 ```go
@@ -207,6 +242,16 @@ client := &http.Client{
 	Transport: httpx.Transport(nil),
 }
 ```
+
+`Transport` adds basic outbound request logging and request ID propagation.
+For more control, use `httpx.NewTransportLogger(rt, logger)` and call `EnableBodyLogging(maxBytes)` when you want small body capture.
+Body logging is size-limited, skips oversized or unsupported bodies by design, and redacts JSON or form fields using the package redaction keys.
+
+## File Rotation
+
+Size-based rotation is available through `Config.FileMaxSizeBytes` and `Config.FileMaxBackups`.
+It is intentionally simple: no time-based rotation, compression, or external dependency chain.
+It is not a drop-in replacement for a full production log rotation system.
 
 ## Redaction
 

@@ -1,70 +1,129 @@
 package logx
 
 import (
-	"bytes"
 	"context"
 	"log/slog"
+	"strings"
+	"sync"
 	"testing"
 )
 
-func TestStacktraceLevel_AddsStack(t *testing.T) {
+type stackCaptureHandler struct {
+	mu    sync.Mutex
+	stack string
+}
+
+func (h *stackCaptureHandler) Enabled(ctx context.Context, level slog.Level) bool { return true }
+
+func (h *stackCaptureHandler) Handle(ctx context.Context, r slog.Record) error {
+	r.Attrs(func(a slog.Attr) bool {
+		if a.Key == "stack" {
+			h.mu.Lock()
+			h.stack = a.Value.String()
+			h.mu.Unlock()
+		}
+		return true
+	})
+	return nil
+}
+
+func (h *stackCaptureHandler) WithAttrs(attrs []slog.Attr) slog.Handler { return h }
+func (h *stackCaptureHandler) WithGroup(name string) slog.Handler       { return h }
+
+func (h *stackCaptureHandler) Stack() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.stack
+}
+
+func TestStackHandler_WithAttrsPreservesEnabled(t *testing.T) {
+	cap := &stackCaptureHandler{}
+	h := &stackHandler{next: cap, level: slog.LevelError, enabled: true}
+
+	child := h.WithAttrs([]slog.Attr{{Key: "component", Value: slog.StringValue("api")}})
+	slog.New(child).Error("boom")
+
+	if cap.Stack() == "" {
+		t.Fatalf("expected stack on child handler")
+	}
+}
+
+func TestStackHandler_WithGroupPreservesEnabled(t *testing.T) {
+	cap := &stackCaptureHandler{}
+	h := &stackHandler{next: cap, level: slog.LevelError, enabled: true}
+
+	child := h.WithGroup("group")
+	slog.New(child).Error("boom")
+
+	if cap.Stack() == "" {
+		t.Fatalf("expected stack on grouped child handler")
+	}
+}
+
+func TestStackHandler_WithAttrsDisabledPassThrough(t *testing.T) {
+	cap := &stackCaptureHandler{}
+	h := &stackHandler{next: cap, level: slog.LevelError, enabled: false}
+
+	if got := h.WithAttrs(nil); got != cap {
+		t.Fatalf("expected passthrough handler when stack disabled")
+	}
+}
+
+func TestStackHandler_WithGroupDisabledPassThrough(t *testing.T) {
+	cap := &stackCaptureHandler{}
+	h := &stackHandler{next: cap, level: slog.LevelError, enabled: false}
+
+	if got := h.WithGroup("group"); got != cap {
+		t.Fatalf("expected passthrough handler when stack disabled")
+	}
+}
+
+func TestStackMaxBytes_RaceSafeUpdates(t *testing.T) {
 	Reset()
+	defer Reset()
+	defer SetStackMaxBytes(defaultStackMaxBytes)
 
-	var buf bytes.Buffer
-	useColor = false
+	cap := &stackCaptureHandler{}
+	SetLogger(slog.New(newStackHandler(cap, slog.LevelError, true)))
 
-	err := Configure(Config{
-		Level:             slog.LevelInfo,
-		Console:           false,
-		StacktraceLevel:   slog.LevelError,
-		StacktraceEnabled: true,
-	})
-
-	if err != nil {
-		t.Fatalf("unexpected configure error: %v", err)
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(offset int) {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				SetStackMaxBytes(128 + offset + j)
+				Error("stack update")
+			}
+		}(i)
 	}
+	wg.Wait()
 
-	handler := slog.NewTextHandler(&buf, &slog.HandlerOptions{
-		Level:     levelVar,
-		AddSource: false,
-	})
-	logger = slog.New(newStackHandler(handler, slog.LevelError, true))
-
-	Error("boom")
-
-	out := buf.String()
-
-	if out == "" {
-		t.Fatalf("expected output, got empty")
+	if cap.Stack() == "" {
+		t.Fatalf("expected stack captured during concurrent updates")
 	}
 }
 
-type passthroughHandler struct{}
+func TestStackTruncation(t *testing.T) {
+	Reset()
+	defer Reset()
+	defer SetStackMaxBytes(defaultStackMaxBytes)
 
-func (p *passthroughHandler) Enabled(ctx context.Context, level slog.Level) bool { return true }
-func (p *passthroughHandler) Handle(ctx context.Context, r slog.Record) error    { return nil }
-func (p *passthroughHandler) WithAttrs(attrs []slog.Attr) slog.Handler           { return p }
-func (p *passthroughHandler) WithGroup(name string) slog.Handler                 { return p }
+	SetStackMaxBytes(32)
 
-func TestNewStackHandler_WithDelegation(t *testing.T) {
-	p := &passthroughHandler{}
-	h := newStackHandler(p, slog.LevelError, true)
-	if h == nil {
-		t.Fatalf("expected stack handler")
+	cap := &stackCaptureHandler{}
+	SetLogger(slog.New(newStackHandler(cap, slog.LevelError, true)))
+
+	Error("truncate me")
+
+	stack := cap.Stack()
+	if stack == "" {
+		t.Fatalf("expected stack to be attached")
 	}
-
-	if h.WithAttrs(nil) == nil {
-		t.Fatalf("WithAttrs returned nil")
+	if len(stack) > 32 {
+		t.Fatalf("expected stack to be truncated to 32 bytes, got %d: %q", len(stack), stack)
 	}
-	if h.WithGroup("g") == nil {
-		t.Fatalf("WithGroup returned nil")
-	}
-}
-
-func TestNewStackHandler_Disabled(t *testing.T) {
-	p := &passthroughHandler{}
-	h := newStackHandler(p, slog.LevelInfo, false)
-	if h != p {
-		t.Fatalf("expected passthrough handler when disabled")
+	if !strings.Contains(stack, "goroutine") && len(stack) == 32 {
+		t.Fatalf("expected stack content, got %q", stack)
 	}
 }

@@ -1,5 +1,3 @@
-// Package httpx provides HTTP server middleware and client transports
-// integrated with github.com/rannday/go-log.
 package httpx
 
 import (
@@ -14,7 +12,7 @@ type loggingTransport struct {
 	next http.RoundTripper
 }
 
-// Transport wraps rt with outbound request logging.
+// Transport wraps rt with outbound request logging and request ID propagation.
 // If rt is nil, http.DefaultTransport is used.
 func Transport(rt http.RoundTripper) http.RoundTripper {
 	if rt == nil {
@@ -30,6 +28,10 @@ func (t *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		return t.next.RoundTrip(req)
 	}
 	l := logx.LoggerFromContext(req.Context())
+
+	if id, ok := logx.RequestID(req.Context()); ok && req.Header.Get("X-Request-ID") == "" {
+		req.Header.Set("X-Request-ID", id)
+	}
 
 	resp, err := t.next.RoundTrip(req)
 	duration := time.Since(start)
@@ -57,10 +59,7 @@ func (t *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 			"network_error", true,
 		)
 
-		l.ErrorContext(req.Context(),
-			"http request failed",
-			fields...,
-		)
+		l.ErrorContext(req.Context(), "http request failed", fields...)
 
 		return resp, err
 	}
@@ -75,10 +74,7 @@ func (t *loggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		level = slog.LevelWarn
 	}
 
-	l.Log(req.Context(), level,
-		"http request completed",
-		fields...,
-	)
+	l.Log(req.Context(), level, "http request completed", fields...)
 
 	return resp, nil
 }

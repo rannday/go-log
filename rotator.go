@@ -1,6 +1,7 @@
 package logx
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +12,7 @@ import (
 )
 
 // fileRotator is a simple size-based log rotator.
+// It is intentionally minimal: no time rotation, compression, or external deps.
 type fileRotator struct {
 	path    string
 	mu      sync.Mutex
@@ -18,6 +20,7 @@ type fileRotator struct {
 	maxSize int
 	backups int
 	size    int64
+	closed  bool
 }
 
 func newFileRotator(path string, maxSize int, backups int) (*fileRotator, error) {
@@ -40,10 +43,18 @@ func (r *fileRotator) Write(p []byte) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if r.maxSize > 0 && r.size+int64(len(p)) > int64(r.maxSize) {
-		if err := r.rotate(); err != nil {
-			// if rotation fails, still attempt to write to current file
+	if r.closed {
+		return 0, errors.New("file rotator closed")
+	}
+
+	if r.maxSize > 0 && r.size > 0 && r.size+int64(len(p)) > int64(r.maxSize) {
+		if err := r.rotateLocked(); err != nil {
+			return 0, err
 		}
+	}
+
+	if r.f == nil {
+		return 0, errors.New("file rotator closed")
 	}
 
 	n, err := r.f.Write(p)
@@ -54,6 +65,7 @@ func (r *fileRotator) Write(p []byte) (int, error) {
 func (r *fileRotator) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.closed = true
 	if r.f != nil {
 		err := r.f.Close()
 		r.f = nil
@@ -62,15 +74,14 @@ func (r *fileRotator) Close() error {
 	return nil
 }
 
-func (r *fileRotator) rotate() error {
+func (r *fileRotator) rotateLocked() error {
 	if r.f != nil {
-		r.f.Close()
+		_ = r.f.Close()
 	}
 
 	ts := time.Now().UTC().Format("20060102T150405.000000000")
 	rotated := fmt.Sprintf("%s.%s", r.path, ts)
 	if err := os.Rename(r.path, rotated); err != nil {
-		// if rename fails, try to reopen existing file
 		f, err2 := os.OpenFile(r.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 		if err2 != nil {
 			return err2
@@ -83,22 +94,27 @@ func (r *fileRotator) rotate() error {
 
 	f, err := os.OpenFile(r.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
+		_ = os.Rename(rotated, r.path)
+		fallback, reopenErr := os.OpenFile(r.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		if reopenErr != nil {
+			return err
+		}
+		r.f = fallback
+		info, _ := fallback.Stat()
+		r.size = info.Size()
 		return err
 	}
 	r.f = f
 	r.size = 0
 
 	if r.backups > 0 {
-		// remove older backups
 		dir := filepath.Dir(r.path)
 		base := filepath.Base(r.path)
 		entries, _ := filepath.Glob(filepath.Join(dir, base+".*"))
 		sort.Strings(entries)
-		if len(entries) > r.backups {
-			remove := entries[:len(entries)-r.backups]
-			for _, p := range remove {
-				_ = os.Remove(p)
-			}
+		for len(entries) > r.backups {
+			_ = os.Remove(entries[0])
+			entries = entries[1:]
 		}
 	}
 

@@ -42,6 +42,34 @@ func TestRedactionHandler_RedactsKeys(t *testing.T) {
 	}
 }
 
+func TestRedactionHandler_RedactsMixedCaseKeys(t *testing.T) {
+	out := capture(t, slog.LevelInfo, func() {
+		SetRedactedKeys("password")
+		Info("login", "Password", "secret", "user", "admin")
+	})
+
+	if !strings.Contains(out, "Password=REDACTED") {
+		t.Fatalf("expected mixed-case password to be redacted, got: %s", out)
+	}
+}
+
+func TestRedactionHandler_RedactsNestedGroup(t *testing.T) {
+	out := capture(t, slog.LevelInfo, func() {
+		SetRedactedKeys("token")
+		Info("login", "user", "admin", slog.Group("auth", slog.Group("nested",
+			slog.String("token", "secret"),
+			slog.String("ok", "yes"),
+		)))
+	})
+
+	if !strings.Contains(out, "token=REDACTED") {
+		t.Fatalf("expected nested token to be redacted, got: %s", out)
+	}
+	if strings.Contains(out, "secret") {
+		t.Fatalf("expected nested secret to be removed, got: %s", out)
+	}
+}
+
 func TestSanitizeURL_RedactsQueryParams(t *testing.T) {
 	u, _ := url.Parse("https://fw/api?apikey=abc123&name=test")
 

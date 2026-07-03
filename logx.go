@@ -1,4 +1,3 @@
-// Package logx provides a simple wrapper around slog with some additional features:
 package logx
 
 import (
@@ -55,17 +54,30 @@ type Config struct {
 	FileWriter io.WriteCloser
 }
 
+// New builds a logger from cfg without touching package global state.
+// Returned closer is nil when no file-backed writer/rotator was created.
+// If non-nil, closer is safe to call more than once.
+func New(cfg Config) (*slog.Logger, io.Closer, error) {
+	lv := new(slog.LevelVar)
+	lv.Set(cfg.Level)
+	return buildLogger(cfg, lv)
+}
+
 // Configure rebuilds logger handlers and installs the new global logger.
-// Calling Configure again replaces the current handlers and closes any
-// previously configured file-backed writer after the swap.
+// On failure, the previous global logger and writer stay active, and previous
+// closer is not touched.
 func Configure(cfg Config) error {
-	nextLogger, nextCloser, err := buildLogger(cfg)
+	nextLogger, nextCloser, nextLevelVar, colorEnabled, err := buildLoggerWithState(cfg)
+	if err != nil {
+		return err
+	}
 
 	loggerMu.Lock()
 	prevCloser := currentCloser
-	levelVar.Set(cfg.Level)
+	levelVar = nextLevelVar
 	logger = nextLogger
 	currentCloser = nextCloser
+	useColor = colorEnabled
 	slog.SetDefault(nextLogger)
 	loggerMu.Unlock()
 
@@ -76,19 +88,31 @@ func Configure(cfg Config) error {
 	return err
 }
 
-func buildLogger(cfg Config) (*slog.Logger, io.Closer, error) {
+func buildLogger(cfg Config, lv *slog.LevelVar) (*slog.Logger, io.Closer, error) {
+	nextLogger, nextCloser, _, _, err := buildLoggerWithState(cfg, lv)
+	return nextLogger, nextCloser, err
+}
+
+func buildLoggerWithState(cfg Config, lv ...*slog.LevelVar) (*slog.Logger, io.Closer, *slog.LevelVar, bool, error) {
+	var leveler *slog.LevelVar
+	if len(lv) > 0 && lv[0] != nil {
+		leveler = lv[0]
+	} else {
+		leveler = new(slog.LevelVar)
+		leveler.Set(cfg.Level)
+	}
+
 	opts := &slog.HandlerOptions{
-		Level:     levelVar,
+		Level:     leveler,
 		AddSource: cfg.AddSource,
 	}
 
 	var handlers []slog.Handler
+	colorEnabled := false
 
 	if cfg.Console {
-		colorEnabled := detectColor()
-		useColor = colorEnabled
-
 		var writer io.Writer = os.Stderr
+		colorEnabled = detectColor() && !cfg.ConsoleJSON
 		if colorEnabled {
 			writer = &colorWriter{w: os.Stderr}
 		}
@@ -101,14 +125,13 @@ func buildLogger(cfg Config) (*slog.Logger, io.Closer, error) {
 	}
 
 	var fileWriter io.WriteCloser
-	var buildErr error
 	if cfg.FileWriter != nil {
 		fileWriter = cfg.FileWriter
 	} else if cfg.FilePath != "" {
 		if cfg.FileMaxSizeBytes > 0 {
 			r, err := newFileRotator(cfg.FilePath, cfg.FileMaxSizeBytes, cfg.FileMaxBackups)
 			if err != nil {
-				buildErr = err
+				return nil, nil, nil, false, err
 			}
 			if r != nil {
 				fileWriter = r
@@ -120,7 +143,7 @@ func buildLogger(cfg Config) (*slog.Logger, io.Closer, error) {
 				0o644,
 			)
 			if err != nil {
-				buildErr = err
+				return nil, nil, nil, false, err
 			}
 			if f != nil {
 				fileWriter = f
@@ -129,6 +152,7 @@ func buildLogger(cfg Config) (*slog.Logger, io.Closer, error) {
 	}
 
 	if fileWriter != nil {
+		fileWriter = newCloseOnceCloser(fileWriter)
 		if cfg.JSONFile {
 			handlers = append(handlers, slog.NewJSONHandler(fileWriter, opts))
 		} else {
@@ -150,11 +174,11 @@ func buildLogger(cfg Config) (*slog.Logger, io.Closer, error) {
 	handler = newStackHandler(handler, cfg.StacktraceLevel, cfg.StacktraceEnabled || cfg.StacktraceLevel != 0)
 	handler = newRedactionHandler(handler)
 
-	return slog.New(handler), fileWriter, buildErr
+	return slog.New(handler), fileWriter, leveler, colorEnabled, nil
 }
 
-// Reset clears logger state.
-// Intended for testing only.
+// Reset clears package logger state and closes active file writer once.
+// Intended for tests or controlled setup only, not normal application flow.
 func Reset() {
 	loggerMu.Lock()
 	prevCloser := currentCloser
@@ -170,8 +194,9 @@ func Reset() {
 	}
 }
 
-// SetLogger replaces the global logger.
-// Intended for testing only.
+// SetLogger replaces the package-global logger.
+// Intended for tests or controlled setup only, not normal application flow.
+// Pass non-nil logger.
 func SetLogger(l *slog.Logger) {
 	loggerMu.Lock()
 	prevCloser := currentCloser
@@ -184,9 +209,15 @@ func SetLogger(l *slog.Logger) {
 	}
 }
 
-// SetLevel updates the global minimum log level at runtime.
+// SetLevel updates current global logger level.
+// Safe for concurrent use, but only affects current global logger.
 func SetLevel(level slog.Level) {
-	levelVar.Set(level)
+	loggerMu.RLock()
+	lv := levelVar
+	loggerMu.RUnlock()
+	if lv != nil {
+		lv.Set(level)
+	}
 }
 
 // Logger returns the package logger.
@@ -294,6 +325,36 @@ func WithGroup(name string) *slog.Logger {
 
 type multiHandler struct {
 	handlers []slog.Handler
+}
+
+type closeOnceWriteCloser struct {
+	w    io.WriteCloser
+	once sync.Once
+	err  error
+}
+
+func newCloseOnceCloser(w io.WriteCloser) io.WriteCloser {
+	if w == nil {
+		return nil
+	}
+	return &closeOnceWriteCloser{w: w}
+}
+
+func (c *closeOnceWriteCloser) Write(p []byte) (int, error) {
+	if c == nil || c.w == nil {
+		return 0, io.ErrClosedPipe
+	}
+	return c.w.Write(p)
+}
+
+func (c *closeOnceWriteCloser) Close() error {
+	if c == nil || c.w == nil {
+		return nil
+	}
+	c.once.Do(func() {
+		c.err = c.w.Close()
+	})
+	return c.err
 }
 
 func newMultiHandler(h ...slog.Handler) slog.Handler {

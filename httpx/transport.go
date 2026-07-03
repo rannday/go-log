@@ -20,6 +20,7 @@ import (
 const defaultMaxBodyLogBytes = 32 * 1024
 
 // TransportLogger wraps an existing RoundTripper and logs outbound requests.
+// Body capture is size-limited and redacted with the package redaction keys.
 type TransportLogger struct {
 	rt     http.RoundTripper
 	logger *slog.Logger
@@ -43,6 +44,7 @@ func NewTransportLogger(rt http.RoundTripper, logger *slog.Logger) *TransportLog
 }
 
 // EnableBodyLogging enables body capture and sets a maximum capture size.
+// Bodies larger than the limit are skipped instead of partially logged.
 func (t *TransportLogger) EnableBodyLogging(maxBytes int) *TransportLogger {
 	t.LogBody = true
 	if maxBytes <= 0 {
@@ -162,10 +164,18 @@ func (t *TransportLogger) RoundTrip(req *http.Request) (*http.Response, error) {
 		l = logx.LoggerFromContext(req.Context())
 	}
 
+	if id, ok := logx.RequestID(req.Context()); ok && req.Header.Get("X-Request-ID") == "" {
+		req.Header.Set("X-Request-ID", id)
+	}
+
 	// build fields
 	fields := []any{
 		"method", req.Method,
 		"url", logx.SanitizeURL(req.URL),
+	}
+
+	if req.URL != nil {
+		fields = append(fields, "host", req.URL.Host)
 	}
 
 	// optionally capture request body (only for small, known-size bodies)
@@ -182,13 +192,6 @@ func (t *TransportLogger) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 	}
 
-	// propagate request id header from context if present
-	if id, ok := logx.RequestID(req.Context()); ok {
-		if req.Header.Get("X-Request-ID") == "" {
-			req.Header.Set("X-Request-ID", id)
-		}
-	}
-
 	start := time.Now()
 	resp, err := t.rt.RoundTrip(req)
 	duration := time.Since(start)
@@ -198,7 +201,7 @@ func (t *TransportLogger) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	if err != nil {
 		fields = append(fields, "error", err)
-		l.Log(req.Context(), slog.LevelError, "http client request", fields...)
+		l.Log(req.Context(), slog.LevelError, "http request failed", fields...)
 		return resp, err
 	}
 
@@ -226,6 +229,6 @@ func (t *TransportLogger) RoundTrip(req *http.Request) (*http.Response, error) {
 		level = slog.LevelWarn
 	}
 
-	l.Log(req.Context(), level, "http client request completed", fields...)
+	l.Log(req.Context(), level, "http request completed", fields...)
 	return resp, nil
 }

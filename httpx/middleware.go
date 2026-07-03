@@ -5,15 +5,13 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"runtime/debug"
 	"time"
 
 	"github.com/rannday/go-log"
 )
 
 // HTTPMiddleware returns an http.Handler that instruments requests with timing,
-// status-level mapping, panic recovery, and a request-scoped logger stored
-// in the request context (accessible via logx.LoggerFromContext).
+// status-level mapping, panic recovery, and request ID propagation through context.
 func HTTPMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -30,16 +28,10 @@ func HTTPMiddleware(next http.Handler) http.Handler {
 		}
 		ctx = logx.WithRequestID(ctx, reqID)
 
-		// build per-request logger with useful fields
+		// build per-request logger with the request id attached
 		l := logx.Logger().With(
-			"remote_addr", r.RemoteAddr,
-			"user_agent", r.UserAgent(),
-			"method", r.Method,
-			"url", logx.SanitizeURL(r.URL),
+			"request_id", reqID,
 		)
-		if id, ok := logx.RequestID(ctx); ok {
-			l = l.With("request_id", id)
-		}
 
 		ctx = logx.WithLogger(ctx, l)
 		// update request with new context
@@ -56,12 +48,10 @@ func HTTPMiddleware(next http.Handler) http.Handler {
 			if rec := recover(); rec != nil {
 				rw.status = http.StatusInternalServerError
 
-				// use request-scoped logger if present
 				logx.LoggerFromContext(r.Context()).ErrorContext(
 					r.Context(),
 					"http handler panic",
 					"panic", rec,
-					"stack", string(debug.Stack()),
 				)
 
 				http.Error(rw, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -79,9 +69,7 @@ func HTTPMiddleware(next http.Handler) http.Handler {
 				"bytes", rw.bytes,
 			}
 
-			if id, ok := logx.RequestID(r.Context()); ok {
-				fields = append(fields, "request_id", id)
-			}
+			fields = append(fields, "request_id", reqID)
 
 			level := slog.LevelInfo
 			switch {

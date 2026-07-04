@@ -149,3 +149,29 @@ func TestFileRotator_MaxBackups(t *testing.T) {
 		t.Fatalf("expected 1 backup with max backups=1, got %d: %v", len(matches), matches)
 	}
 }
+
+func TestFileRotator_MaxBackupsZeroMeansUnlimited(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app.log")
+
+	r, err := newFileRotator(path, 4, 0)
+	if err != nil {
+		t.Fatalf("newFileRotator failed: %v", err)
+	}
+	defer r.Close()
+
+	for i := 0; i < 4; i++ {
+		if _, err := r.Write([]byte("abcd")); err != nil {
+			t.Fatalf("write %d failed: %v", i, err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	matches, err := filepath.Glob(rotatedLogGlob(path))
+	if err != nil {
+		t.Fatalf("glob failed: %v", err)
+	}
+	if len(matches) != 3 {
+		t.Fatalf("expected unlimited backups when max backups=0, got %d: %v", len(matches), matches)
+	}
+}

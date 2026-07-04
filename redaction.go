@@ -15,17 +15,18 @@ const redactedValue = "REDACTED"
 var defaultURLRedactKeys = []string{"apikey", "password", "token", "key"}
 
 var (
-	redactedKeys         = map[string]struct{}{}
+	redactedKeys         = defaultRedactedKeySet()
 	redactedKeysMu       sync.RWMutex
 	redactedKeysSnapshot atomic.Value // map[string]struct{}
 )
 
 func init() {
-	redactedKeysSnapshot.Store(map[string]struct{}{})
+	redactedKeysSnapshot.Store(cloneKeySet(redactedKeys))
 }
 
-// SetRedactedKeys replaces the global redaction set.
-// Keys are normalized to lowercase.
+// SetRedactedKeys replaces the global structured redaction set exactly.
+// Keys are normalized to lowercase. Built-in defaults are not retained unless
+// they are passed explicitly.
 func SetRedactedKeys(keys ...string) {
 	redactedKeysMu.Lock()
 	defer redactedKeysMu.Unlock()
@@ -46,7 +47,7 @@ func AddRedactedKeys(keys ...string) {
 	redactedKeysSnapshot.Store(cloneKeySet(redactedKeys))
 }
 
-// ClearRedactedKeys removes all configured redacted keys.
+// ClearRedactedKeys removes all structured redaction keys, including defaults.
 func ClearRedactedKeys() {
 	redactedKeysMu.Lock()
 	defer redactedKeysMu.Unlock()
@@ -54,9 +55,20 @@ func ClearRedactedKeys() {
 	redactedKeysSnapshot.Store(map[string]struct{}{})
 }
 
+func resetRedactedKeysToDefault() {
+	redactedKeysMu.Lock()
+	defer redactedKeysMu.Unlock()
+	redactedKeys = defaultRedactedKeySet()
+	redactedKeysSnapshot.Store(cloneKeySet(redactedKeys))
+}
+
 // RedactedKeySet returns a snapshot of configured redacted keys as a set.
-// The returned map must be treated as read-only.
+// The returned map is a clone and can be safely mutated by callers.
 func RedactedKeySet() map[string]struct{} {
+	return cloneKeySet(redactedKeySetSnapshot())
+}
+
+func redactedKeySetSnapshot() map[string]struct{} {
 	keys, _ := redactedKeysSnapshot.Load().(map[string]struct{})
 	return keys
 }
@@ -104,7 +116,7 @@ func SanitizeURL(u *url.URL) string {
 }
 
 func urlRedactionKeySet() map[string]struct{} {
-	configured := RedactedKeySet()
+	configured := redactedKeySetSnapshot()
 	merged := make(map[string]struct{}, len(configured)+len(defaultURLRedactKeys))
 	for k := range configured {
 		merged[k] = struct{}{}
@@ -128,7 +140,7 @@ func (h *redactionHandler) Enabled(ctx context.Context, level slog.Level) bool {
 }
 
 func (h *redactionHandler) Handle(ctx context.Context, r slog.Record) error {
-	keys := RedactedKeySet()
+	keys := redactedKeySetSnapshot()
 	if len(keys) == 0 {
 		return h.next.Handle(ctx, r)
 	}
@@ -170,6 +182,14 @@ func cloneKeySet(src map[string]struct{}) map[string]struct{} {
 	return dst
 }
 
+func defaultRedactedKeySet() map[string]struct{} {
+	keys := make(map[string]struct{}, len(defaultURLRedactKeys))
+	for _, k := range defaultURLRedactKeys {
+		keys[k] = struct{}{}
+	}
+	return keys
+}
+
 func redactAttr(a slog.Attr, keys map[string]struct{}) (slog.Attr, bool) {
 	if _, ok := keys[strings.ToLower(a.Key)]; ok {
 		a.Value = slog.StringValue(redactedValue)
@@ -207,28 +227,59 @@ func redactAnyValue(v any, keys map[string]struct{}) (bool, any) {
 	switch x := v.(type) {
 	case map[string]any:
 		changed := false
+		var redacted map[string]any
 		for k, child := range x {
 			if _, ok := keys[strings.ToLower(k)]; ok {
-				x[k] = redactedValue
+				if redacted == nil {
+					redacted = cloneAnyMap(x)
+				}
+				redacted[k] = redactedValue
 				changed = true
 				continue
 			}
 			if c, next := redactAnyValue(child, keys); c {
-				x[k] = next
+				if redacted == nil {
+					redacted = cloneAnyMap(x)
+				}
+				redacted[k] = next
 				changed = true
 			}
 		}
-		return changed, x
+		if !changed {
+			return false, v
+		}
+		return true, redacted
 	case []any:
 		changed := false
+		var redacted []any
 		for i, child := range x {
 			if c, next := redactAnyValue(child, keys); c {
-				x[i] = next
+				if redacted == nil {
+					redacted = cloneAnySlice(x)
+				}
+				redacted[i] = next
 				changed = true
 			}
 		}
-		return changed, x
+		if !changed {
+			return false, v
+		}
+		return true, redacted
 	default:
 		return false, v
 	}
+}
+
+func cloneAnyMap(src map[string]any) map[string]any {
+	dst := make(map[string]any, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func cloneAnySlice(src []any) []any {
+	dst := make([]any, len(src))
+	copy(dst, src)
+	return dst
 }

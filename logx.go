@@ -46,7 +46,7 @@ type Config struct {
 	StacktraceEnabled bool
 	// File rotation settings
 	FileMaxSizeBytes int // rotate when file exceeds this many bytes (0 = disabled)
-	FileMaxBackups   int // number of rotated files to keep
+	FileMaxBackups   int // number of rotated files to keep (<=0 = unlimited)
 	// ConsoleJSON outputs console logs as JSON when true
 	ConsoleJSON bool
 	// FileWriter can be provided to control file output (overrides FilePath)
@@ -183,7 +183,7 @@ func Reset() {
 	currentCloser = nil
 	levelVar = new(slog.LevelVar)
 	loggerMu.Unlock()
-	ClearRedactedKeys()
+	resetRedactedKeysToDefault()
 
 	if prevCloser != nil {
 		_ = prevCloser.Close()
@@ -192,8 +192,12 @@ func Reset() {
 
 // SetLogger replaces the package-global logger.
 // Intended for tests or controlled setup only, not normal application flow.
-// Pass non-nil logger.
+// Passing nil installs a safe stderr text logger.
 func SetLogger(l *slog.Logger) {
+	if l == nil {
+		l = slog.New(slog.NewTextHandler(os.Stderr, nil))
+	}
+
 	loggerMu.Lock()
 	prevCloser := currentCloser
 	logger = l

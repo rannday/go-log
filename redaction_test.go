@@ -42,6 +42,47 @@ func TestRedactionHandler_RedactsKeys(t *testing.T) {
 	}
 }
 
+func TestRedactionHandler_DefaultRedactsPassword(t *testing.T) {
+	out := capture(t, slog.LevelInfo, func() {
+		Info("login", "password", "secret")
+	})
+
+	if !strings.Contains(out, "password=REDACTED") {
+		t.Fatalf("expected default password redaction, got: %s", out)
+	}
+	if strings.Contains(out, "secret") {
+		t.Fatalf("expected secret value removed, got: %s", out)
+	}
+}
+
+func TestClearRedactedKeys_DisablesStructuredRedaction(t *testing.T) {
+	out := capture(t, slog.LevelInfo, func() {
+		ClearRedactedKeys()
+		Info("login", "password", "secret")
+	})
+
+	if !strings.Contains(out, "password=secret") {
+		t.Fatalf("expected password to remain unredacted, got: %s", out)
+	}
+	if strings.Contains(out, "password=REDACTED") {
+		t.Fatalf("expected structured redaction disabled, got: %s", out)
+	}
+}
+
+func TestSetRedactedKeys_ReplacesDefaults(t *testing.T) {
+	out := capture(t, slog.LevelInfo, func() {
+		SetRedactedKeys("secret")
+		Info("fields", "password", "pw", "secret", "value")
+	})
+
+	if !strings.Contains(out, "password=pw") {
+		t.Fatalf("expected password default to be replaced, got: %s", out)
+	}
+	if !strings.Contains(out, "secret=REDACTED") {
+		t.Fatalf("expected configured key to be redacted, got: %s", out)
+	}
+}
+
 func TestRedactionHandler_RedactsMixedCaseKeys(t *testing.T) {
 	out := capture(t, slog.LevelInfo, func() {
 		SetRedactedKeys("password")
@@ -86,7 +127,7 @@ func TestSanitizeURL_RedactsQueryParams(t *testing.T) {
 
 func TestSanitizeURL_RedactsConfiguredKeys(t *testing.T) {
 	ClearRedactedKeys()
-	defer ClearRedactedKeys()
+	defer Reset()
 	SetRedactedKeys("secret")
 
 	u, _ := url.Parse("https://fw/api?secret=abc&name=test")
@@ -97,6 +138,21 @@ func TestSanitizeURL_RedactsConfiguredKeys(t *testing.T) {
 	}
 	if !strings.Contains(s, "secret=REDACTED") {
 		t.Fatalf("expected secret=REDACTED, got: %s", s)
+	}
+}
+
+func TestSanitizeURL_RedactsDefaultKeysAfterClear(t *testing.T) {
+	ClearRedactedKeys()
+	defer Reset()
+
+	u, _ := url.Parse("https://fw/api?password=secret&name=test")
+	s := SanitizeURL(u)
+
+	if strings.Contains(s, "secret") {
+		t.Fatalf("expected default password param to be redacted, got: %s", s)
+	}
+	if !strings.Contains(s, "password=REDACTED") {
+		t.Fatalf("expected password=REDACTED, got: %s", s)
 	}
 }
 
@@ -123,5 +179,86 @@ func TestRedactionHandler_RedactsAnyMap(t *testing.T) {
 	}
 	if strings.Contains(out, "secret") {
 		t.Fatalf("expected secret value removed, got: %s", out)
+	}
+}
+
+func TestRedactedKeySet_ReturnsClone(t *testing.T) {
+	SetRedactedKeys("password")
+	defer Reset()
+
+	keys := RedactedKeySet()
+	delete(keys, "password")
+	keys["token"] = struct{}{}
+
+	fresh := RedactedKeySet()
+	if _, ok := fresh["password"]; !ok {
+		t.Fatalf("expected internal redaction set to keep password")
+	}
+	if _, ok := fresh["token"]; ok {
+		t.Fatalf("expected mutation of returned map not to affect internal state")
+	}
+}
+
+func TestRedactAnyValue_DoesNotMutateMap(t *testing.T) {
+	SetRedactedKeys("password")
+	defer Reset()
+
+	original := map[string]any{"password": "secret"}
+	changed, redacted := redactAnyValue(original, redactedKeySetSnapshot())
+
+	if !changed {
+		t.Fatalf("expected redaction to change returned value")
+	}
+	if original["password"] != "secret" {
+		t.Fatalf("expected original map to remain unchanged, got: %#v", original)
+	}
+	got := redacted.(map[string]any)
+	if got["password"] != redactedValue {
+		t.Fatalf("expected redacted copy, got: %#v", got)
+	}
+}
+
+func TestRedactAnyValue_DoesNotMutateNestedMap(t *testing.T) {
+	SetRedactedKeys("token")
+	defer Reset()
+
+	nested := map[string]any{"token": "secret"}
+	original := map[string]any{"outer": nested}
+	changed, redacted := redactAnyValue(original, redactedKeySetSnapshot())
+
+	if !changed {
+		t.Fatalf("expected nested redaction to change returned value")
+	}
+	if nested["token"] != "secret" {
+		t.Fatalf("expected nested map to remain unchanged, got: %#v", nested)
+	}
+	got := redacted.(map[string]any)
+	gotNested := got["outer"].(map[string]any)
+	if gotNested["token"] != redactedValue {
+		t.Fatalf("expected redacted nested copy, got: %#v", gotNested)
+	}
+}
+
+func TestRedactAnyValue_DoesNotMutateSlice(t *testing.T) {
+	SetRedactedKeys("token")
+	defer Reset()
+
+	child := map[string]any{"token": "secret"}
+	original := []any{child}
+	changed, redacted := redactAnyValue(original, redactedKeySetSnapshot())
+
+	if !changed {
+		t.Fatalf("expected slice redaction to change returned value")
+	}
+	if child["token"] != "secret" {
+		t.Fatalf("expected original map in slice to remain unchanged, got: %#v", child)
+	}
+	if original[0].(map[string]any)["token"] != "secret" {
+		t.Fatalf("expected original slice to remain unchanged, got: %#v", original)
+	}
+	got := redacted.([]any)
+	gotChild := got[0].(map[string]any)
+	if gotChild["token"] != redactedValue {
+		t.Fatalf("expected redacted slice copy, got: %#v", got)
 	}
 }

@@ -255,6 +255,7 @@ Body logging is size-limited, skips oversized or unsupported bodies by design, a
 ## File Rotation
 
 Size-based rotation is available through `Config.FileMaxSizeBytes` and `Config.FileMaxBackups`.
+`FileMaxBackups <= 0` means unlimited rotated backups.
 It is intentionally simple: no time-based rotation, compression, or external dependency chain.
 It is not a drop-in replacement for a full production log rotation system.
 
@@ -270,5 +271,7 @@ Example output:
 password=REDACTED
 ```
 
-URL sanitization uses `SetRedactedKeys` plus built-in defaults (`apikey`, `password`, `token`, `key`).
+Structured field redaction defaults to `apikey`, `password`, `token`, and `key`.
+`SetRedactedKeys` replaces that set exactly; `ClearRedactedKeys` disables structured field redaction.
+URL sanitization uses configured keys plus built-in defaults (`apikey`, `password`, `token`, `key`), even after `ClearRedactedKeys`.
 User credentials in the URL userinfo are also redacted.

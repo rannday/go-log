@@ -179,6 +179,22 @@ func TestConfigure_FileFailureFallback(t *testing.T) {
 	}
 }
 
+func TestSetLoggerNilInstallsSafeDefault(t *testing.T) {
+	Reset()
+	defer Reset()
+
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("SetLogger(nil) or subsequent log panicked: %v", r)
+			}
+		}()
+
+		SetLogger(nil)
+		Logger().Info("nil logger safe")
+	}()
+}
+
 //
 // ---- Fatal Test ----
 //

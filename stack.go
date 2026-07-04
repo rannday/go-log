@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"runtime/debug"
 	"sync/atomic"
+	"unicode/utf8"
 )
 
 type stackHandler struct {
@@ -65,7 +66,7 @@ func (h *stackHandler) Handle(ctx context.Context, r slog.Record) error {
 		stack := debug.Stack()
 		limit := currentStackMaxBytes()
 		if len(stack) > limit {
-			stack = stack[:limit]
+			stack = trimStackBytes(stack, limit)
 		}
 		r.AddAttrs(slog.String("stack", string(stack)))
 	}
@@ -79,4 +80,16 @@ func (h *stackHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 
 func (h *stackHandler) WithGroup(name string) slog.Handler {
 	return newStackHandler(h.next.WithGroup(name), h.level, h.enabled)
+}
+
+func trimStackBytes(stack []byte, limit int) []byte {
+	if len(stack) <= limit {
+		return stack
+	}
+	stack = stack[:limit]
+	for len(stack) > 0 && !utf8.Valid(stack) {
+		_, size := utf8.DecodeLastRune(stack)
+		stack = stack[:len(stack)-size]
+	}
+	return stack
 }

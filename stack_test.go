@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 )
 
 type stackCaptureHandler struct {
@@ -125,5 +126,16 @@ func TestStackTruncation(t *testing.T) {
 	}
 	if !strings.Contains(stack, "goroutine") && len(stack) == 32 {
 		t.Fatalf("expected stack content, got %q", stack)
+	}
+}
+
+func TestTrimStackBytes_UTF8Safe(t *testing.T) {
+	got := trimStackBytes([]byte("ab☃cd"), 4)
+
+	if !utf8.Valid(got) {
+		t.Fatalf("expected valid utf-8, got %q", got)
+	}
+	if string(got) != "ab" {
+		t.Fatalf("expected trim before partial rune, got %q", got)
 	}
 }

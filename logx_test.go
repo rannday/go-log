@@ -24,18 +24,13 @@ func capture(t *testing.T, level slog.Level, fn func()) string {
 	var buf bytes.Buffer
 
 	levelVar.Set(level)
-	useColor = false
 
 	base := slog.NewTextHandler(&buf, &slog.HandlerOptions{
 		Level:     levelVar,
 		AddSource: false,
 	})
 
-	// Match Configure() decorator chain
-	handler := newStackHandler(base, 0, false)
-	handler = newRedactionHandler(handler)
-
-	logger = slog.New(handler)
+	logger = slog.New(WrapHandler(base, Config{}))
 
 	fn()
 	return buf.String()
@@ -130,8 +125,6 @@ func TestSetLevel_RuntimeChange(t *testing.T) {
 	Reset()
 
 	var buf bytes.Buffer
-	useColor = false
-
 	handler := slog.NewTextHandler(&buf, &slog.HandlerOptions{
 		Level:     levelVar,
 		AddSource: false,
@@ -193,7 +186,6 @@ func TestConfigure_FileFailureFallback(t *testing.T) {
 func TestFatal_ExitsWithCode1AndLogs(t *testing.T) {
 	if os.Getenv("LOGX_FATAL_CHILD") == "1" {
 		Reset()
-		useColor = false
 
 		handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 			Level:     levelVar,
@@ -585,6 +577,21 @@ func TestReset_ClearsStateAndClosesWriter(t *testing.T) {
 	}
 }
 
+func TestMultiHandler_SkipsDisabledHandlers(t *testing.T) {
+	var calls int
+	h1 := &countingHandler{enabled: false, onHandle: func() { calls++ }}
+	h2 := &countingHandler{enabled: true, onHandle: func() { calls++ }}
+	m := newMultiHandler(h1, h2)
+
+	rec := slog.NewRecord(time.Now(), slog.LevelInfo, "m", 0)
+	if err := m.Handle(context.Background(), rec); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected only enabled handler to handle record, got %d calls", calls)
+	}
+}
+
 func TestMultiHandler_ReturnsFirstError(t *testing.T) {
 	e1 := errors.New("first")
 	h := newMultiHandler(&errHandler{err: e1}, &errHandler{err: nil})
@@ -669,6 +676,21 @@ func (t *trackingWriteCloser) CloseCount() int {
 	defer t.mu.Unlock()
 	return t.closeCount
 }
+
+type countingHandler struct {
+	enabled  bool
+	onHandle func()
+}
+
+func (c *countingHandler) Enabled(ctx context.Context, level slog.Level) bool { return c.enabled }
+func (c *countingHandler) Handle(ctx context.Context, r slog.Record) error {
+	if c.onHandle != nil {
+		c.onHandle()
+	}
+	return nil
+}
+func (c *countingHandler) WithAttrs(attrs []slog.Attr) slog.Handler { return c }
+func (c *countingHandler) WithGroup(name string) slog.Handler       { return c }
 
 type testHandler struct{ enabled bool }
 

@@ -62,14 +62,9 @@ func bodyLogLimit(max int) int {
 	return max
 }
 
-func redactJSON(b []byte, redactedKeys []string) []byte {
-	if len(redactedKeys) == 0 || len(b) == 0 {
+func redactJSON(b []byte, keys map[string]struct{}) []byte {
+	if len(keys) == 0 || len(b) == 0 {
 		return b
-	}
-
-	keySet := make(map[string]struct{}, len(redactedKeys))
-	for _, k := range redactedKeys {
-		keySet[strings.ToLower(k)] = struct{}{}
 	}
 
 	var payload any
@@ -78,7 +73,7 @@ func redactJSON(b []byte, redactedKeys []string) []byte {
 		return b
 	}
 
-	redactJSONValue(payload, keySet)
+	redactJSONValue(payload, keys)
 
 	out, err := json.Marshal(payload)
 	if err != nil {
@@ -104,17 +99,9 @@ func redactJSONValue(v any, keySet map[string]struct{}) {
 	}
 }
 
-func redactForm(s string, redactedKeys []string) string {
+func redactForm(s string, keys map[string]struct{}) string {
 	vals, _ := url.ParseQuery(s)
-	keySet := make(map[string]struct{}, len(redactedKeys))
-	for _, k := range redactedKeys {
-		keySet[strings.ToLower(k)] = struct{}{}
-	}
-	for k := range vals {
-		if _, ok := keySet[strings.ToLower(k)]; ok {
-			vals.Set(k, "REDACTED")
-		}
-	}
+	logx.RedactQueryValues(vals, keys)
 	return vals.Encode()
 }
 
@@ -135,11 +122,12 @@ func captureBodyForLog(body io.ReadCloser, contentLength int64, contentType stri
 
 	body = io.NopCloser(bytes.NewReader(bodyBytes))
 
+	keys := logx.RedactedKeySet()
 	redacted := ""
 	if strings.Contains(contentType, "application/json") {
-		redacted = string(redactJSON(bodyBytes, logx.ListRedactedKeys()))
+		redacted = string(redactJSON(bodyBytes, keys))
 	} else if strings.Contains(contentType, "application/x-www-form-urlencoded") {
-		redacted = redactForm(string(bodyBytes), logx.ListRedactedKeys())
+		redacted = redactForm(string(bodyBytes), keys)
 	} else {
 		if len(bodyBytes) > limit {
 			redacted = string(bodyBytes[:limit])
@@ -156,19 +144,9 @@ func (t *TransportLogger) RoundTrip(req *http.Request) (*http.Response, error) {
 		return t.rt.RoundTrip(req)
 	}
 
-	// choose logger: explicit -> context -> global
-	var l *slog.Logger
-	if t.logger != nil {
-		l = t.logger
-	} else {
-		l = logx.LoggerFromContext(req.Context())
-	}
+	l := roundTripLogger(req, t.logger)
+	propagateRequestID(req)
 
-	if id, ok := logx.RequestID(req.Context()); ok && req.Header.Get("X-Request-ID") == "" {
-		req.Header.Set("X-Request-ID", id)
-	}
-
-	// build fields
 	fields := []any{
 		"method", req.Method,
 		"url", logx.SanitizeURL(req.URL),
@@ -178,7 +156,6 @@ func (t *TransportLogger) RoundTrip(req *http.Request) (*http.Response, error) {
 		fields = append(fields, "host", req.URL.Host)
 	}
 
-	// optionally capture request body (only for small, known-size bodies)
 	if t.LogBody {
 		var (
 			body    string
@@ -194,18 +171,14 @@ func (t *TransportLogger) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	start := time.Now()
 	resp, err := t.rt.RoundTrip(req)
-	duration := time.Since(start)
-
-	// append duration
-	fields = append(fields, "duration", duration)
+	fields = append(fields, "duration", time.Since(start))
+	fields = appendRequestIDField(req.Context(), fields)
 
 	if err != nil {
-		fields = append(fields, "error", err)
-		l.Log(req.Context(), slog.LevelError, "http request failed", fields...)
+		logHTTPFailure(l, req.Context(), fields, err, true)
 		return resp, err
 	}
 
-	// optionally capture small response bodies for logging
 	if t.LogBody && resp != nil {
 		var (
 			body    string
@@ -219,16 +192,6 @@ func (t *TransportLogger) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 	}
 
-	fields = append(fields, "status", resp.StatusCode)
-
-	level := slog.LevelInfo
-	switch {
-	case resp.StatusCode >= 500:
-		level = slog.LevelError
-	case resp.StatusCode >= 400:
-		level = slog.LevelWarn
-	}
-
-	l.Log(req.Context(), level, "http request completed", fields...)
+	logHTTPCompletion(l, req.Context(), resp.StatusCode, fields)
 	return resp, nil
 }

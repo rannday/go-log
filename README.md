@@ -11,6 +11,7 @@ Zero dependency. Go 1.26.3+ is intentional.
 - HTTP client transport
 - `Configure` installs package-global logger
 - `New` builds logger without touching globals
+- `WrapHandler` composes stack-trace and redaction decorators without globals
 - File rotation is size-based only
 - Color output is text-console only
 
@@ -176,6 +177,10 @@ ctx := logx.WithRequestID(ctx, "abc123")
 id, ok := logx.RequestID(ctx)
 ```
 
+Context-aware helpers (`InfoContext`, `ErrorErrContext`, `Timed`, and friends) use
+`LoggerFromContext`, so request-scoped loggers from `httpx` middleware or
+`logx.WithLogger` are picked up automatically.
+
 ## Timing Helpers
 
 ```go
@@ -210,7 +215,7 @@ defer done()
 logx.Fatal("unrecoverable error")
 ```
 
-Logs at error level and exits with status code `1`.
+Logs at error level (there is no separate fatal level) and exits with status code `1`.
 
 ## Testing
 
@@ -265,4 +270,5 @@ Example output:
 password=REDACTED
 ```
 
-Query parameters like `apikey`, `password`, `token`, and `key` are automatically redacted in URLs.
+URL sanitization uses `SetRedactedKeys` plus built-in defaults (`apikey`, `password`, `token`, `key`).
+User credentials in the URL userinfo are also redacted.

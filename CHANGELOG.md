@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Context helpers (`InfoContext`, `ErrorErrContext`, `Timed`, and friends) use `LoggerFromContext`
+- `SanitizeURL` honors `SetRedactedKeys` plus built-in defaults and redacts URL userinfo
+- `Transport` is now a thin wrapper around `NewTransportLogger`
+- Rotated log files use the `.logx-rotated-` suffix; oversized writes rotate after landing
+- `multiHandler` skips handlers that are disabled for the record level
+
+### Added
+
+- `WrapHandler` for composing stack-trace and redaction decorators without globals
+- `RedactedKeySet` and `RedactQueryValues` for shared redaction lookups
+- `httpx.HTTPStatusLevel` for consistent HTTP status-to-level mapping
+
 ## v0.1.0
 
 Initial release of `github.com/rannday/go-log`.

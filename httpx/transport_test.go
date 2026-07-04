@@ -31,12 +31,11 @@ func captureHTTP(t *testing.T, fn func()) string {
 
 	var buf bytes.Buffer
 
-	handler := slog.NewTextHandler(&buf, &slog.HandlerOptions{
+	base := slog.NewTextHandler(&buf, &slog.HandlerOptions{
 		Level:     slog.LevelDebug,
 		AddSource: false,
 	})
-
-	logx.SetLogger(slog.New(handler)) // or direct assignment if internal
+	logx.SetLogger(slog.New(logx.WrapHandler(base, logx.Config{})))
 
 	fn()
 
@@ -221,7 +220,11 @@ func TestTransportLogger_RestoresBodies(t *testing.T) {
 
 func TestRedactJSON_NestedAndCaseInsensitive(t *testing.T) {
 	in := []byte(`{"Password":"secret","nested":{"token":"abc"},"items":[{"ApiKey":"k"},{"x":1}]}`)
-	out := string(redactJSON(in, []string{"password", "token", "apikey"}))
+	out := string(redactJSON(in, map[string]struct{}{
+		"password": {},
+		"token":    {},
+		"apikey":   {},
+	}))
 
 	if strings.Contains(out, "secret") || strings.Contains(out, "abc") || strings.Contains(out, `"k"`) {
 		t.Fatalf("expected nested secrets to be redacted, got: %s", out)
@@ -233,7 +236,7 @@ func TestRedactJSON_NestedAndCaseInsensitive(t *testing.T) {
 
 func TestRedactJSON_InvalidJSONFallback(t *testing.T) {
 	in := []byte(`{"password":"secret"`)
-	out := redactJSON(in, []string{"password"})
+	out := redactJSON(in, map[string]struct{}{"password": {}})
 	if string(out) != string(in) {
 		t.Fatalf("expected invalid JSON to be returned unchanged")
 	}

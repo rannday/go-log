@@ -2,14 +2,16 @@ package logx
 
 import (
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
+
+const rotatedLogSuffix = ".logx-rotated-"
 
 // fileRotator is a simple size-based log rotator.
 // It is intentionally minimal: no time rotation, compression, or external deps.
@@ -34,8 +36,12 @@ func newFileRotator(path string, maxSize int, backups int) (*fileRotator, error)
 		return nil, err
 	}
 
-	info, _ := f.Stat()
-	r := &fileRotator{path: path, f: f, maxSize: maxSize, backups: backups, size: info.Size()}
+	info, err := f.Stat()
+	var size int64
+	if err == nil {
+		size = info.Size()
+	}
+	r := &fileRotator{path: path, f: f, maxSize: maxSize, backups: backups, size: size}
 	return r, nil
 }
 
@@ -59,7 +65,17 @@ func (r *fileRotator) Write(p []byte) (int, error) {
 
 	n, err := r.f.Write(p)
 	r.size += int64(n)
-	return n, err
+	if err != nil {
+		return n, err
+	}
+
+	if r.maxSize > 0 && r.size > int64(r.maxSize) {
+		if rotErr := r.rotateLocked(); rotErr != nil {
+			return n, rotErr
+		}
+	}
+
+	return n, nil
 }
 
 func (r *fileRotator) Close() error {
@@ -80,7 +96,7 @@ func (r *fileRotator) rotateLocked() error {
 	}
 
 	ts := time.Now().UTC().Format("20060102T150405.000000000")
-	rotated := fmt.Sprintf("%s.%s", r.path, ts)
+	rotated := r.path + rotatedLogSuffix + ts
 	if err := os.Rename(r.path, rotated); err != nil {
 		f, err2 := os.OpenFile(r.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 		if err2 != nil {
@@ -108,9 +124,7 @@ func (r *fileRotator) rotateLocked() error {
 	r.size = 0
 
 	if r.backups > 0 {
-		dir := filepath.Dir(r.path)
-		base := filepath.Base(r.path)
-		entries, _ := filepath.Glob(filepath.Join(dir, base+".*"))
+		entries, _ := filepath.Glob(r.path + rotatedLogSuffix + "*")
 		sort.Strings(entries)
 		for len(entries) > r.backups {
 			_ = os.Remove(entries[0])
@@ -119,6 +133,13 @@ func (r *fileRotator) rotateLocked() error {
 	}
 
 	return nil
+}
+
+func rotatedLogGlob(path string) string {
+	if strings.HasSuffix(path, rotatedLogSuffix) {
+		return path + "*"
+	}
+	return path + rotatedLogSuffix + "*"
 }
 
 // Ensure fileRotator implements io.WriteCloser

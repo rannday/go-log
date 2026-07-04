@@ -83,3 +83,45 @@ func TestSanitizeURL_RedactsQueryParams(t *testing.T) {
 		t.Fatalf("expected apikey=REDACTED, got: %s", s)
 	}
 }
+
+func TestSanitizeURL_RedactsConfiguredKeys(t *testing.T) {
+	ClearRedactedKeys()
+	defer ClearRedactedKeys()
+	SetRedactedKeys("secret")
+
+	u, _ := url.Parse("https://fw/api?secret=abc&name=test")
+	s := SanitizeURL(u)
+
+	if strings.Contains(s, "abc") {
+		t.Fatalf("expected configured secret param to be redacted, got: %s", s)
+	}
+	if !strings.Contains(s, "secret=REDACTED") {
+		t.Fatalf("expected secret=REDACTED, got: %s", s)
+	}
+}
+
+func TestSanitizeURL_RedactsUserCredentials(t *testing.T) {
+	u, _ := url.Parse("https://admin:pass@fw/api?name=test")
+	s := SanitizeURL(u)
+
+	if strings.Contains(s, "admin") || strings.Contains(s, "pass") {
+		t.Fatalf("expected user credentials to be redacted, got: %s", s)
+	}
+	if !strings.Contains(s, "REDACTED:REDACTED@") {
+		t.Fatalf("expected redacted userinfo, got: %s", s)
+	}
+}
+
+func TestRedactionHandler_RedactsAnyMap(t *testing.T) {
+	out := capture(t, slog.LevelInfo, func() {
+		SetRedactedKeys("token")
+		Info("payload", "data", map[string]any{"token": "secret", "ok": true})
+	})
+
+	if !strings.Contains(out, "token:REDACTED") {
+		t.Fatalf("expected map token to be redacted, got: %s", out)
+	}
+	if strings.Contains(out, "secret") {
+		t.Fatalf("expected secret value removed, got: %s", out)
+	}
+}

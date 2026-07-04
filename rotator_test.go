@@ -31,8 +31,23 @@ func TestFileRotator_OversizedSingleWrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read failed: %v", err)
 	}
-	if len(data) != len(payload) {
-		t.Fatalf("expected oversized write to land in file, got %d bytes", len(data))
+	if len(data) != 0 {
+		t.Fatalf("expected active file to be empty after oversized write rotation, got %d bytes", len(data))
+	}
+
+	matches, err := filepath.Glob(rotatedLogGlob(path))
+	if err != nil {
+		t.Fatalf("glob failed: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("expected one rotated backup, got %d: %v", len(matches), matches)
+	}
+	backup, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Fatalf("read backup failed: %v", err)
+	}
+	if len(backup) != len(payload) {
+		t.Fatalf("expected backup to contain oversized payload, got %d bytes", len(backup))
 	}
 }
 
@@ -71,7 +86,7 @@ func TestFileRotator_BackupPruning(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 
-	matches, err := filepath.Glob(path + ".*")
+	matches, err := filepath.Glob(rotatedLogGlob(path))
 	if err != nil {
 		t.Fatalf("glob failed: %v", err)
 	}
@@ -126,7 +141,7 @@ func TestFileRotator_MaxBackups(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 
-	matches, err := filepath.Glob(path + ".*")
+	matches, err := filepath.Glob(rotatedLogGlob(path))
 	if err != nil {
 		t.Fatalf("glob failed: %v", err)
 	}

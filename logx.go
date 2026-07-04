@@ -15,7 +15,6 @@ import (
 var (
 	logger        *slog.Logger
 	levelVar      = new(slog.LevelVar)
-	useColor      bool
 	loggerMu      sync.RWMutex
 	currentCloser io.Closer
 )
@@ -67,7 +66,7 @@ func New(cfg Config) (*slog.Logger, io.Closer, error) {
 // On failure, the previous global logger and writer stay active, and previous
 // closer is not touched.
 func Configure(cfg Config) error {
-	nextLogger, nextCloser, nextLevelVar, colorEnabled, err := buildLoggerWithState(cfg)
+	nextLogger, nextCloser, nextLevelVar, _, err := buildLoggerWithState(cfg)
 	if err != nil {
 		return err
 	}
@@ -77,7 +76,6 @@ func Configure(cfg Config) error {
 	levelVar = nextLevelVar
 	logger = nextLogger
 	currentCloser = nextCloser
-	useColor = colorEnabled
 	slog.SetDefault(nextLogger)
 	loggerMu.Unlock()
 
@@ -171,8 +169,7 @@ func buildLoggerWithState(cfg Config, lv ...*slog.LevelVar) (*slog.Logger, io.Cl
 		handler = newMultiHandler(handlers...)
 	}
 
-	handler = newStackHandler(handler, cfg.StacktraceLevel, cfg.StacktraceEnabled || cfg.StacktraceLevel != 0)
-	handler = newRedactionHandler(handler)
+	handler = WrapHandler(handler, cfg)
 
 	return slog.New(handler), fileWriter, leveler, colorEnabled, nil
 }
@@ -184,7 +181,6 @@ func Reset() {
 	prevCloser := currentCloser
 	logger = nil
 	currentCloser = nil
-	useColor = false
 	levelVar = new(slog.LevelVar)
 	loggerMu.Unlock()
 	ClearRedactedKeys()
@@ -224,21 +220,26 @@ func SetLevel(level slog.Level) {
 // If no logger has been configured yet, it initializes a default
 // console logger at info level.
 func Logger() *slog.Logger {
-	loggerMu.RLock()
-	l := logger
-	loggerMu.RUnlock()
-
-	if l == nil {
-		_ = Configure(Config{
-			Level:   slog.LevelInfo,
-			Console: true,
-		})
-
-		loggerMu.RLock()
-		l = logger
-		loggerMu.RUnlock()
+	loggerMu.Lock()
+	defer loggerMu.Unlock()
+	if logger == nil {
+		initDefaultLoggerLocked()
 	}
-	return l
+	return logger
+}
+
+func initDefaultLoggerLocked() {
+	l, closer, lv, _, err := buildLoggerWithState(Config{
+		Level:   slog.LevelInfo,
+		Console: true,
+	})
+	if err != nil {
+		return
+	}
+	logger = l
+	currentCloser = closer
+	levelVar = lv
+	slog.SetDefault(l)
 }
 
 // Debug logs a message at debug level.
@@ -261,7 +262,7 @@ func Error(msg string, args ...any) {
 	Logger().Error(msg, args...)
 }
 
-// Fatal logs a message at error level and exits the process with status 1.
+// Fatal logs at error level (there is no separate fatal level) and exits with status 1.
 func Fatal(msg string, args ...any) {
 	Logger().Error(msg, args...)
 	os.Exit(1)
@@ -283,34 +284,34 @@ func ErrorErr(msg string, err error, args ...any) {
 	Logger().Error(msg, errorFields(err, args...)...)
 }
 
-// DebugContext logs a debug message with context.
+// DebugContext logs a debug message with context using LoggerFromContext.
 func DebugContext(ctx context.Context, msg string, args ...any) {
-	Logger().DebugContext(ctx, msg, args...)
+	LoggerFromContext(ctx).DebugContext(ctx, msg, args...)
 }
 
-// InfoContext logs an info message with context.
+// InfoContext logs an info message with context using LoggerFromContext.
 func InfoContext(ctx context.Context, msg string, args ...any) {
-	Logger().InfoContext(ctx, msg, args...)
+	LoggerFromContext(ctx).InfoContext(ctx, msg, args...)
 }
 
-// WarnContext logs a warn message with context.
+// WarnContext logs a warn message with context using LoggerFromContext.
 func WarnContext(ctx context.Context, msg string, args ...any) {
-	Logger().WarnContext(ctx, msg, args...)
+	LoggerFromContext(ctx).WarnContext(ctx, msg, args...)
 }
 
-// ErrorContext logs an error message with context.
+// ErrorContext logs an error message with context using LoggerFromContext.
 func ErrorContext(ctx context.Context, msg string, args ...any) {
-	Logger().ErrorContext(ctx, msg, args...)
+	LoggerFromContext(ctx).ErrorContext(ctx, msg, args...)
 }
 
 // ErrorErrContext is the context-aware variant of ErrorErr.
 func ErrorErrContext(ctx context.Context, msg string, err error, args ...any) {
 	if err == nil {
-		Logger().ErrorContext(ctx, msg, args...)
+		LoggerFromContext(ctx).ErrorContext(ctx, msg, args...)
 		return
 	}
 
-	Logger().ErrorContext(ctx, msg, errorFields(err, args...)...)
+	LoggerFromContext(ctx).ErrorContext(ctx, msg, errorFields(err, args...)...)
 }
 
 // With returns a child logger with additional structured attributes.
@@ -373,6 +374,9 @@ func (m *multiHandler) Enabled(ctx context.Context, level slog.Level) bool {
 func (m *multiHandler) Handle(ctx context.Context, r slog.Record) error {
 	var firstErr error
 	for _, h := range m.handlers {
+		if !h.Enabled(ctx, r.Level) {
+			continue
+		}
 		if err := h.Handle(ctx, r); err != nil && firstErr == nil {
 			firstErr = err
 		}
@@ -396,9 +400,9 @@ func (m *multiHandler) WithGroup(name string) slog.Handler {
 	return newMultiHandler(next...)
 }
 
-// Timed uses the default logger.
+// Timed uses LoggerFromContext for the request-scoped logger when present.
 func Timed(ctx context.Context, msg string, args ...any) func(extra ...any) {
-	return TimedLevel(Logger(), slog.LevelInfo, ctx, msg, args...)
+	return TimedLevel(LoggerFromContext(ctx), slog.LevelInfo, ctx, msg, args...)
 }
 
 // TimedWith uses a provided logger (supports With(), WithGroup(), etc.)
@@ -460,6 +464,8 @@ func errorFields(err error, args ...any) []any {
 	return fields
 }
 
+// colorWriter applies ANSI colors to slog text handler output by matching
+// "level=LEVEL" substrings. It is not suitable for JSON or custom formats.
 type colorWriter struct {
 	w io.Writer
 }

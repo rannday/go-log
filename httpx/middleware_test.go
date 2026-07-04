@@ -18,8 +18,8 @@ func captureMiddleware(t *testing.T, fn func()) string {
 	defer logx.Reset()
 
 	var buf bytes.Buffer
-	handler := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug, AddSource: false})
-	logx.SetLogger(slog.New(handler))
+	base := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug, AddSource: false})
+	logx.SetLogger(slog.New(logx.WrapHandler(base, logx.Config{})))
 
 	fn()
 

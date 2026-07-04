@@ -2,7 +2,6 @@ package httpx
 
 import (
 	"bufio"
-	"log/slog"
 	"net"
 	"net/http"
 	"time"
@@ -69,18 +68,9 @@ func HTTPMiddleware(next http.Handler) http.Handler {
 				"bytes", rw.bytes,
 			}
 
-			fields = append(fields, "request_id", reqID)
-
-			level := slog.LevelInfo
-			switch {
-			case rw.status >= 500:
-				level = slog.LevelError
-			case rw.status >= 400:
-				level = slog.LevelWarn
-			}
-
-			// use request-scoped logger
-			logx.LoggerFromContext(r.Context()).Log(r.Context(), level,
+			logx.LoggerFromContext(r.Context()).Log(
+				r.Context(),
+				HTTPStatusLevel(rw.status),
 				"http request completed",
 				fields...,
 			)

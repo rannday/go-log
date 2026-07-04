@@ -10,26 +10,9 @@ import (
 	"sync/atomic"
 )
 
-// SanitizeURL returns a redacted URL string with sensitive query parameters masked.
-func SanitizeURL(u *url.URL) string {
-	if u == nil {
-		return ""
-	}
+const redactedValue = "REDACTED"
 
-	clone := *u
-	q := clone.Query()
-
-	for k := range q {
-		lk := strings.ToLower(k)
-		switch lk {
-		case "apikey", "password", "token", "key":
-			q.Set(k, "REDACTED")
-		}
-	}
-
-	clone.RawQuery = q.Encode()
-	return clone.String()
-}
+var defaultURLRedactKeys = []string{"apikey", "password", "token", "key"}
 
 var (
 	redactedKeys         = map[string]struct{}{}
@@ -46,7 +29,7 @@ func init() {
 func SetRedactedKeys(keys ...string) {
 	redactedKeysMu.Lock()
 	defer redactedKeysMu.Unlock()
-	redactedKeys = make(map[string]struct{}, len(redactedKeys)+len(keys))
+	redactedKeys = make(map[string]struct{}, len(keys))
 	for _, k := range keys {
 		redactedKeys[strings.ToLower(k)] = struct{}{}
 	}
@@ -71,15 +54,65 @@ func ClearRedactedKeys() {
 	redactedKeysSnapshot.Store(map[string]struct{}{})
 }
 
-// ListRedactedKeys returns a snapshot of configured redacted keys.
-func ListRedactedKeys() []string {
+// RedactedKeySet returns a snapshot of configured redacted keys as a set.
+// The returned map must be treated as read-only.
+func RedactedKeySet() map[string]struct{} {
 	keys, _ := redactedKeysSnapshot.Load().(map[string]struct{})
+	return keys
+}
+
+// ListRedactedKeys returns a sorted snapshot of configured redacted keys.
+func ListRedactedKeys() []string {
+	keys := RedactedKeySet()
 	out := make([]string, 0, len(keys))
 	for k := range keys {
 		out = append(out, k)
 	}
 	sort.Strings(out)
 	return out
+}
+
+// RedactQueryValues masks values for keys present in keys (case-insensitive).
+func RedactQueryValues(q url.Values, keys map[string]struct{}) {
+	if len(keys) == 0 || len(q) == 0 {
+		return
+	}
+	for k := range q {
+		if _, ok := keys[strings.ToLower(k)]; ok {
+			q.Set(k, redactedValue)
+		}
+	}
+}
+
+// SanitizeURL returns a redacted URL string with sensitive query parameters
+// and user credentials masked. Query redaction uses SetRedactedKeys plus a
+// built-in default set (apikey, password, token, key).
+func SanitizeURL(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+
+	clone := *u
+	if clone.User != nil {
+		clone.User = url.UserPassword(redactedValue, redactedValue)
+	}
+
+	q := clone.Query()
+	RedactQueryValues(q, urlRedactionKeySet())
+	clone.RawQuery = q.Encode()
+	return clone.String()
+}
+
+func urlRedactionKeySet() map[string]struct{} {
+	configured := RedactedKeySet()
+	merged := make(map[string]struct{}, len(configured)+len(defaultURLRedactKeys))
+	for k := range configured {
+		merged[k] = struct{}{}
+	}
+	for _, k := range defaultURLRedactKeys {
+		merged[k] = struct{}{}
+	}
+	return merged
 }
 
 type redactionHandler struct {
@@ -95,7 +128,7 @@ func (h *redactionHandler) Enabled(ctx context.Context, level slog.Level) bool {
 }
 
 func (h *redactionHandler) Handle(ctx context.Context, r slog.Record) error {
-	keys, _ := redactedKeysSnapshot.Load().(map[string]struct{})
+	keys := RedactedKeySet()
 	if len(keys) == 0 {
 		return h.next.Handle(ctx, r)
 	}
@@ -139,27 +172,63 @@ func cloneKeySet(src map[string]struct{}) map[string]struct{} {
 
 func redactAttr(a slog.Attr, keys map[string]struct{}) (slog.Attr, bool) {
 	if _, ok := keys[strings.ToLower(a.Key)]; ok {
-		a.Value = slog.StringValue("REDACTED")
+		a.Value = slog.StringValue(redactedValue)
 		return a, true
 	}
 
-	if a.Value.Kind() != slog.KindGroup {
-		return a, false
+	switch a.Value.Kind() {
+	case slog.KindGroup:
+		group := a.Value.Group()
+		redacted := make([]slog.Attr, 0, len(group))
+		changed := false
+		for _, child := range group {
+			next, ok := redactAttr(child, keys)
+			if ok {
+				changed = true
+			}
+			redacted = append(redacted, next)
+		}
+		if !changed {
+			return a, false
+		}
+		a.Value = slog.GroupValue(redacted...)
+		return a, true
+	case slog.KindAny:
+		if changed, v := redactAnyValue(a.Value.Any(), keys); changed {
+			a.Value = slog.AnyValue(v)
+			return a, true
+		}
 	}
 
-	group := a.Value.Group()
-	redacted := make([]slog.Attr, 0, len(group))
-	changed := false
-	for _, child := range group {
-		next, ok := redactAttr(child, keys)
-		if ok {
-			changed = true
+	return a, false
+}
+
+func redactAnyValue(v any, keys map[string]struct{}) (bool, any) {
+	switch x := v.(type) {
+	case map[string]any:
+		changed := false
+		for k, child := range x {
+			if _, ok := keys[strings.ToLower(k)]; ok {
+				x[k] = redactedValue
+				changed = true
+				continue
+			}
+			if c, next := redactAnyValue(child, keys); c {
+				x[k] = next
+				changed = true
+			}
 		}
-		redacted = append(redacted, next)
+		return changed, x
+	case []any:
+		changed := false
+		for i, child := range x {
+			if c, next := redactAnyValue(child, keys); c {
+				x[i] = next
+				changed = true
+			}
+		}
+		return changed, x
+	default:
+		return false, v
 	}
-	if !changed {
-		return a, false
-	}
-	a.Value = slog.GroupValue(redacted...)
-	return a, true
 }

@@ -39,7 +39,7 @@ func (h *stackCaptureHandler) Stack() string {
 
 func TestStackHandler_WithAttrsPreservesEnabled(t *testing.T) {
 	cap := &stackCaptureHandler{}
-	h := &stackHandler{next: cap, level: slog.LevelError, enabled: true}
+	h := newStackHandler(cap, slog.LevelError, true)
 
 	child := h.WithAttrs([]slog.Attr{{Key: "component", Value: slog.StringValue("api")}})
 	slog.New(child).Error("boom")
@@ -51,7 +51,7 @@ func TestStackHandler_WithAttrsPreservesEnabled(t *testing.T) {
 
 func TestStackHandler_WithGroupPreservesEnabled(t *testing.T) {
 	cap := &stackCaptureHandler{}
-	h := &stackHandler{next: cap, level: slog.LevelError, enabled: true}
+	h := newStackHandler(cap, slog.LevelError, true)
 
 	child := h.WithGroup("group")
 	slog.New(child).Error("boom")
@@ -63,7 +63,7 @@ func TestStackHandler_WithGroupPreservesEnabled(t *testing.T) {
 
 func TestStackHandler_WithAttrsDisabledPassThrough(t *testing.T) {
 	cap := &stackCaptureHandler{}
-	h := &stackHandler{next: cap, level: slog.LevelError, enabled: false}
+	h := newStackHandler(cap, slog.LevelError, false)
 
 	if got := h.WithAttrs(nil); got != cap {
 		t.Fatalf("expected passthrough handler when stack disabled")
@@ -72,7 +72,7 @@ func TestStackHandler_WithAttrsDisabledPassThrough(t *testing.T) {
 
 func TestStackHandler_WithGroupDisabledPassThrough(t *testing.T) {
 	cap := &stackCaptureHandler{}
-	h := &stackHandler{next: cap, level: slog.LevelError, enabled: false}
+	h := newStackHandler(cap, slog.LevelError, false)
 
 	if got := h.WithGroup("group"); got != cap {
 		t.Fatalf("expected passthrough handler when stack disabled")

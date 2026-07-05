@@ -2,6 +2,7 @@ package logx
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ const rotatedLogSuffix = ".logx-rotated-"
 
 // fileRotator is a simple size-based log rotator.
 // It is intentionally minimal: no time rotation, compression, or external deps.
+// All methods are safe for concurrent use; writes and rotation share one mutex.
 type fileRotator struct {
 	path    string
 	mu      sync.Mutex
@@ -92,32 +94,30 @@ func (r *fileRotator) Close() error {
 
 func (r *fileRotator) rotateLocked() error {
 	if r.f != nil {
+		_ = r.f.Sync()
 		_ = r.f.Close()
+		r.f = nil
 	}
 
 	ts := time.Now().UTC().Format("20060102T150405.000000000")
 	rotated := r.path + rotatedLogSuffix + ts
 	if err := os.Rename(r.path, rotated); err != nil {
-		f, err2 := os.OpenFile(r.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		f, err2 := r.reopenActiveFile()
 		if err2 != nil {
-			return err2
+			return fmt.Errorf("logx: rotate rename %q: %w", r.path, err)
 		}
 		r.f = f
-		info, _ := f.Stat()
-		r.size = info.Size()
 		return err
 	}
 
-	f, err := os.OpenFile(r.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	f, err := r.reopenActiveFile()
 	if err != nil {
 		_ = os.Rename(rotated, r.path)
-		fallback, reopenErr := os.OpenFile(r.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		fallback, reopenErr := r.reopenActiveFile()
 		if reopenErr != nil {
-			return err
+			return fmt.Errorf("logx: rotate reopen %q after rollback: %w", r.path, err)
 		}
 		r.f = fallback
-		info, _ := fallback.Stat()
-		r.size = info.Size()
 		return err
 	}
 	r.f = f
@@ -133,6 +133,18 @@ func (r *fileRotator) rotateLocked() error {
 	}
 
 	return nil
+}
+
+func (r *fileRotator) reopenActiveFile() (*os.File, error) {
+	f, err := os.OpenFile(r.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	info, statErr := f.Stat()
+	if statErr == nil {
+		r.size = info.Size()
+	}
+	return f, nil
 }
 
 func rotatedLogGlob(path string) string {

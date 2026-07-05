@@ -1,6 +1,7 @@
 package logx
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -101,6 +102,18 @@ type exampleLoggableError struct {
 func (e exampleLoggableError) Error() string { return "api failure" }
 func (e exampleLoggableError) LogAttrs() []slog.Attr {
 	return []slog.Attr{slog.String("code", e.code)}
+}
+
+func ExampleWrapHandler() {
+	var buf bytes.Buffer
+	base := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})
+	h := WrapHandler(base, Config{StacktraceLevel: slog.LevelError})
+	logger := slog.New(h)
+
+	logger.Info("ok", "user", "alice")
+	logger.Error("boom", "password", "secret")
+
+	// Output includes redacted password and stack trace fields for errors.
 }
 
 func ExampleErrorErr() {

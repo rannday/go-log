@@ -12,9 +12,8 @@ import (
 )
 
 type stackHandler struct {
-	next    slog.Handler
-	level   slog.Level
-	enabled bool
+	baseDecorator
+	level slog.Level
 }
 
 const defaultStackMaxBytes = 64 * 1024
@@ -46,19 +45,14 @@ func currentStackMaxBytes() int {
 }
 
 func newStackHandler(next slog.Handler, level slog.Level, enabled bool) slog.Handler {
-	// If stack traces are disabled, return the original handler.
 	if !enabled {
 		return next
 	}
-	return &stackHandler{
-		next:    next,
-		level:   level,
-		enabled: true,
-	}
-}
-
-func (h *stackHandler) Enabled(ctx context.Context, level slog.Level) bool {
-	return h.next.Enabled(ctx, level)
+	h := &stackHandler{level: level}
+	h.init(next, func(n slog.Handler) slog.Handler {
+		return newStackHandler(n, level, true)
+	})
+	return h
 }
 
 func (h *stackHandler) Handle(ctx context.Context, r slog.Record) error {
@@ -72,14 +66,6 @@ func (h *stackHandler) Handle(ctx context.Context, r slog.Record) error {
 	}
 
 	return h.next.Handle(ctx, r)
-}
-
-func (h *stackHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return newStackHandler(h.next.WithAttrs(attrs), h.level, h.enabled)
-}
-
-func (h *stackHandler) WithGroup(name string) slog.Handler {
-	return newStackHandler(h.next.WithGroup(name), h.level, h.enabled)
 }
 
 func trimStackBytes(stack []byte, limit int) []byte {

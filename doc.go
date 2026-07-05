@@ -10,6 +10,6 @@
 // own context logger APIs in the standard library.
 //
 // File rotation is size-based only. Color output is limited to text console
-// output and matches slog text "level=LEVEL" formatting. HTTP helpers live
-// in the httpx subpackage.
+// output and colors the slog level attribute via ReplaceAttr. HTTP helpers
+// live in the httpx subpackage.
 package logx

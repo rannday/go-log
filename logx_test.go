@@ -634,22 +634,21 @@ func TestMultiHandler_WithGroupAndWithAttrs(t *testing.T) {
 	}
 }
 
-func TestColorWriter_ReplacesLevelColor(t *testing.T) {
-	var buf bytes.Buffer
-	cw := &colorWriter{w: &buf}
-
-	line := "time=now level=ERROR msg=oops\n"
-	_, err := cw.Write([]byte(line))
-	if err != nil {
-		t.Fatalf("write failed: %v", err)
-	}
-
-	out := buf.String()
-	if !strings.Contains(out, "level=ERROR") {
-		t.Fatalf("expected level text present")
+func TestColorLevelReplaceAttr_ColorsLevel(t *testing.T) {
+	a := colorLevelReplaceAttr(nil, slog.Attr{Key: slog.LevelKey, Value: slog.AnyValue(slog.LevelError)})
+	out := a.Value.String()
+	if !strings.Contains(out, "ERROR") {
+		t.Fatalf("expected level text present, got %q", out)
 	}
 	if !strings.Contains(out, "\033[31m") {
-		t.Fatalf("expected red color escape in output")
+		t.Fatalf("expected red color escape in output, got %q", out)
+	}
+}
+
+func TestColorLevelReplaceAttr_SkipsGroupedAttrs(t *testing.T) {
+	a := colorLevelReplaceAttr([]string{"g"}, slog.Attr{Key: slog.LevelKey, Value: slog.AnyValue(slog.LevelError)})
+	if strings.Contains(a.Value.String(), "\033[31m") {
+		t.Fatalf("expected grouped level attr to remain uncolored")
 	}
 }
 

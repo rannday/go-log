@@ -1,7 +1,6 @@
 package logx
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -13,6 +12,8 @@ import (
 )
 
 var (
+	// loggerMu protects logger, levelVar, and currentCloser.
+	// Logger(), Configure(), SetLevel(), SetLogger(), and Reset() are safe for concurrent use.
 	logger        *slog.Logger
 	levelVar      = new(slog.LevelVar)
 	loggerMu      sync.RWMutex
@@ -57,6 +58,9 @@ type Config struct {
 // Returned closer is nil when no file-backed writer/rotator was created.
 // If non-nil, closer is safe to call more than once.
 func New(cfg Config) (*slog.Logger, io.Closer, error) {
+	if err := cfg.validate(); err != nil {
+		return nil, nil, err
+	}
 	lv := new(slog.LevelVar)
 	lv.Set(cfg.Level)
 	return buildLogger(cfg, lv)
@@ -66,6 +70,10 @@ func New(cfg Config) (*slog.Logger, io.Closer, error) {
 // On failure, the previous global logger and writer stay active, and previous
 // closer is not touched.
 func Configure(cfg Config) error {
+	if err := cfg.validate(); err != nil {
+		return err
+	}
+
 	nextLogger, nextCloser, nextLevelVar, _, err := buildLoggerWithState(cfg)
 	if err != nil {
 		return err
@@ -83,7 +91,7 @@ func Configure(cfg Config) error {
 		_ = prevCloser.Close()
 	}
 
-	return err
+	return nil
 }
 
 func buildLogger(cfg Config, lv *slog.LevelVar) (*slog.Logger, io.Closer, error) {
@@ -100,27 +108,21 @@ func buildLoggerWithState(cfg Config, lv ...*slog.LevelVar) (*slog.Logger, io.Cl
 		leveler.Set(cfg.Level)
 	}
 
-	opts := &slog.HandlerOptions{
-		Level:     leveler,
-		AddSource: cfg.AddSource,
-	}
-
 	var handlers []slog.Handler
 	colorEnabled := false
 
 	if cfg.Console {
-		var writer io.Writer = os.Stderr
 		colorEnabled = detectColor() && !cfg.ConsoleJSON
-		if colorEnabled {
-			writer = &colorWriter{w: os.Stderr}
-		}
+		consoleOpts := handlerOptions(leveler, cfg.AddSource, colorEnabled)
 
 		if cfg.ConsoleJSON {
-			handlers = append(handlers, slog.NewJSONHandler(writer, opts))
+			handlers = append(handlers, slog.NewJSONHandler(os.Stderr, consoleOpts))
 		} else {
-			handlers = append(handlers, slog.NewTextHandler(writer, opts))
+			handlers = append(handlers, slog.NewTextHandler(os.Stderr, consoleOpts))
 		}
 	}
+
+	fileOpts := handlerOptions(leveler, cfg.AddSource, false)
 
 	var fileWriter io.WriteCloser
 	if cfg.FileWriter != nil {
@@ -152,14 +154,15 @@ func buildLoggerWithState(cfg Config, lv ...*slog.LevelVar) (*slog.Logger, io.Cl
 	if fileWriter != nil {
 		fileWriter = newCloseOnceCloser(fileWriter)
 		if cfg.JSONFile {
-			handlers = append(handlers, slog.NewJSONHandler(fileWriter, opts))
+			handlers = append(handlers, slog.NewJSONHandler(fileWriter, fileOpts))
 		} else {
-			handlers = append(handlers, slog.NewTextHandler(fileWriter, opts))
+			handlers = append(handlers, slog.NewTextHandler(fileWriter, fileOpts))
 		}
 	}
 
 	if len(handlers) == 0 {
-		handlers = append(handlers, slog.NewTextHandler(os.Stderr, opts))
+		fallbackOpts := handlerOptions(leveler, cfg.AddSource, detectColor())
+		handlers = append(handlers, slog.NewTextHandler(os.Stderr, fallbackOpts))
 	}
 
 	var handler slog.Handler
@@ -288,24 +291,28 @@ func ErrorErr(msg string, err error, args ...any) {
 	Logger().Error(msg, errorFields(err, args...)...)
 }
 
+func logContext(ctx context.Context, level slog.Level, msg string, args ...any) {
+	LoggerFromContext(ctx).Log(ctx, level, msg, args...)
+}
+
 // DebugContext logs a debug message with context using LoggerFromContext.
 func DebugContext(ctx context.Context, msg string, args ...any) {
-	LoggerFromContext(ctx).DebugContext(ctx, msg, args...)
+	logContext(ctx, slog.LevelDebug, msg, args...)
 }
 
 // InfoContext logs an info message with context using LoggerFromContext.
 func InfoContext(ctx context.Context, msg string, args ...any) {
-	LoggerFromContext(ctx).InfoContext(ctx, msg, args...)
+	logContext(ctx, slog.LevelInfo, msg, args...)
 }
 
 // WarnContext logs a warn message with context using LoggerFromContext.
 func WarnContext(ctx context.Context, msg string, args ...any) {
-	LoggerFromContext(ctx).WarnContext(ctx, msg, args...)
+	logContext(ctx, slog.LevelWarn, msg, args...)
 }
 
 // ErrorContext logs an error message with context using LoggerFromContext.
 func ErrorContext(ctx context.Context, msg string, args ...any) {
-	LoggerFromContext(ctx).ErrorContext(ctx, msg, args...)
+	logContext(ctx, slog.LevelError, msg, args...)
 }
 
 // ErrorErrContext is the context-aware variant of ErrorErr.
@@ -332,6 +339,8 @@ type multiHandler struct {
 	handlers []slog.Handler
 }
 
+// closeOnceWriteCloser wraps a WriteCloser so Close is idempotent.
+// Safe for concurrent Write; Close runs at most once.
 type closeOnceWriteCloser struct {
 	w    io.WriteCloser
 	once sync.Once
@@ -468,45 +477,31 @@ func errorFields(err error, args ...any) []any {
 	return fields
 }
 
-// colorWriter applies ANSI colors to slog text handler output by matching
-// "level=LEVEL" substrings. It is not suitable for JSON or custom formats.
-type colorWriter struct {
-	w io.Writer
-}
+// colorLevelReplaceAttr colors the slog level attribute for text console output.
+// Applied via HandlerOptions.ReplaceAttr; not used for JSON handlers.
+func colorLevelReplaceAttr(groups []string, a slog.Attr) slog.Attr {
+	if len(groups) > 0 || a.Key != slog.LevelKey {
+		return a
+	}
+	level, ok := a.Value.Any().(slog.Level)
+	if !ok {
+		return a
+	}
 
-func (cw *colorWriter) Write(p []byte) (int, error) {
-	var (
-		levelTag []byte
-		colored  []byte
-	)
-
+	var color string
 	switch {
-	case bytes.Contains(p, []byte("level=ERROR")):
-		levelTag = []byte("level=ERROR")
-		colored = []byte(colorRed + "level=ERROR" + colorReset)
-	case bytes.Contains(p, []byte("level=WARN")):
-		levelTag = []byte("level=WARN")
-		colored = []byte(colorYellow + "level=WARN" + colorReset)
-	case bytes.Contains(p, []byte("level=INFO")):
-		levelTag = []byte("level=INFO")
-		colored = []byte(colorGreen + "level=INFO" + colorReset)
-	case bytes.Contains(p, []byte("level=DEBUG")):
-		levelTag = []byte("level=DEBUG")
-		colored = []byte(colorGray + "level=DEBUG" + colorReset)
+	case level >= slog.LevelError:
+		color = colorRed
+	case level >= slog.LevelWarn:
+		color = colorYellow
+	case level >= slog.LevelInfo:
+		color = colorGreen
 	default:
-		return cw.w.Write(p)
+		color = colorGray
 	}
 
-	i := bytes.Index(p, levelTag)
-	if i < 0 {
-		return cw.w.Write(p)
-	}
-
-	out := make([]byte, 0, len(p)+len(colored)-len(levelTag))
-	out = append(out, p[:i]...)
-	out = append(out, colored...)
-	out = append(out, p[i+len(levelTag):]...)
-	return cw.w.Write(out)
+	a.Value = slog.StringValue(color + level.String() + colorReset)
+	return a
 }
 
 func detectColor() bool {

@@ -127,16 +127,41 @@ func urlRedactionKeySet() map[string]struct{} {
 	return merged
 }
 
+var attrSlicePool = sync.Pool{
+	New: func() any {
+		s := make([]slog.Attr, 0, 32)
+		return &s
+	},
+}
+
+func borrowAttrSlice(estimate int) []slog.Attr {
+	p, ok := attrSlicePool.Get().(*[]slog.Attr)
+	if !ok || p == nil {
+		return make([]slog.Attr, 0, estimate)
+	}
+	s := *p
+	if cap(s) < estimate {
+		return make([]slog.Attr, 0, estimate)
+	}
+	return s[:0]
+}
+
+func releaseAttrSlice(s []slog.Attr) {
+	if cap(s) > 128 {
+		return
+	}
+	s = s[:0]
+	attrSlicePool.Put(&s)
+}
+
 type redactionHandler struct {
-	next slog.Handler
+	baseDecorator
 }
 
 func newRedactionHandler(next slog.Handler) slog.Handler {
-	return &redactionHandler{next: next}
-}
-
-func (h *redactionHandler) Enabled(ctx context.Context, level slog.Level) bool {
-	return h.next.Enabled(ctx, level)
+	h := &redactionHandler{}
+	h.init(next, newRedactionHandler)
+	return h
 }
 
 func (h *redactionHandler) Handle(ctx context.Context, r slog.Record) error {
@@ -145,7 +170,7 @@ func (h *redactionHandler) Handle(ctx context.Context, r slog.Record) error {
 		return h.next.Handle(ctx, r)
 	}
 
-	attrs := make([]slog.Attr, 0, r.NumAttrs())
+	attrs := borrowAttrSlice(r.NumAttrs())
 	changed := false
 	r.Attrs(func(a slog.Attr) bool {
 		redacted, ok := redactAttr(a, keys)
@@ -157,21 +182,15 @@ func (h *redactionHandler) Handle(ctx context.Context, r slog.Record) error {
 	})
 
 	if !changed {
+		releaseAttrSlice(attrs)
 		return h.next.Handle(ctx, r)
 	}
 
 	newRec := slog.NewRecord(r.Time, r.Level, r.Message, r.PC)
 	newRec.AddAttrs(attrs...)
+	releaseAttrSlice(attrs)
 
 	return h.next.Handle(ctx, newRec)
-}
-
-func (h *redactionHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return newRedactionHandler(h.next.WithAttrs(attrs))
-}
-
-func (h *redactionHandler) WithGroup(name string) slog.Handler {
-	return newRedactionHandler(h.next.WithGroup(name))
 }
 
 func cloneKeySet(src map[string]struct{}) map[string]struct{} {

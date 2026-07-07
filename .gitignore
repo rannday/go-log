@@ -1,20 +1,12 @@
-logs/
-bin/
-*.test
-*.exe
-*.dll
-*.so
-*.dylib
-*.log
-*.tmp
-*.swp
-*.swo
+# Editor and OS files
 .DS_Store
 .idea/
 .vscode/
-cover
-coverage
-cover_root
-coverage_root
-coverage.out
-*.coverprofile
+*.swp
+
+# Go build/test artifacts
+/bin/
+/dist/
+*.test
+*.out
+coverage.*
